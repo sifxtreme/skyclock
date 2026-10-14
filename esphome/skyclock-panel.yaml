@@ -1,0 +1,200 @@
+# skyclock panel: shows one server-rendered PNG, refreshed on an interval
+# Board: Waveshare ESP32-S3-Touch-LCD-7 (800x480 RGB panel, ST7262, GT911 touch,
+#        CH422G IO expander, 8 MB octal PSRAM).
+# Job:   join Wi-Fi, fetch one 800x480 PNG from a fixed URL every 30 s, show it
+#        full screen. Reboots itself if no good image arrives for 3 refreshes.
+#
+# Built and validated against ESPHome 2026.9.1 (pinned; see FLASHING.md).
+# Secrets come from secrets.yaml next to this file (copy secrets.example.yaml).
+# Never commit secrets.yaml.
+
+substitutions:
+  device_name: lcd-satellite-proof
+  # How often to fetch the image.
+  refresh_interval: 30s
+  # Staleness limit = 3 x refresh_interval, in ms. Change both together.
+  stale_after_ms: "90000"
+
+esphome:
+  name: ${device_name}
+  friendly_name: LCD satellite proof
+  min_version: 2026.9.1
+  on_boot:
+    - priority: 600
+      then:
+        - logger.log:
+            level: INFO
+            format: "BOOT lcd-satellite-proof; stale reboots so far: %u"
+            args: ["(unsigned) id(stale_reboots)"]
+
+esp32:
+  variant: esp32s3
+  # The board is sold as 8 MB or 16 MB flash depending on batch. 8 MB is
+  # safe on both (a 16 MB layout on an 8 MB chip will not boot). The
+  # firmware is about 1.5 MB, so the smaller layout costs nothing here.
+  flash_size: 8MB
+  cpu_frequency: 240MHz
+  framework:
+    type: esp-idf
+
+# 8 MB octal PSRAM. Required by the RGB panel (frame buffer) and online_image.
+# 80 MHz is the stable choice. If the panel jitters or flickers under Wi-Fi
+# load, try speed: 120MHz (needs framework.advanced.
+# enable_idf_experimental_features: true), as the community package does.
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  level: DEBUG
+  # Serial logs go out the port silkscreened UART (USB-UART bridge on UART0,
+  # GPIO43/44), the same port used to flash. The ESP32-S3 default would be
+  # the native USB port instead.
+  hardware_uart: UART0
+
+# Reset reason and chip info in the boot log (useful after a reboot).
+debug:
+  update_interval: 5min
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Reboot if Wi-Fi is down this long (ESPHome default is 15 min).
+  reboot_timeout: 10min
+  # Fetch at once on connect instead of waiting a full refresh_interval.
+  # (One IMAGE ERROR at boot, from the poll that runs before Wi-Fi is up,
+  # is normal.)
+  on_connect:
+    - component.update: proof_image
+
+# Native API: only for wireless logs (`esphome logs`) and Home Assistant later.
+# reboot_timeout 0s stops the device rebooting every 15 min when no Home
+# Assistant connects, which is the normal case for this test.
+api:
+  encryption:
+    key: !secret api_key
+  reboot_timeout: 0s
+
+# OTA uploads are encrypted with the same api_key (ESPHome 2026.9 inherits it
+# when `encryption` is empty); no separate OTA password.
+ota:
+  - platform: esphome
+    encryption: {}
+
+http_request:
+  # Default is 4.5 s; the known hang (esphome/issues#6530) starts after a
+  # timeout. A longer timeout plus the staleness reboot below covers it.
+  timeout: 15s
+  watchdog_timeout: 20s
+  # https URLs are checked against the ESP-IDF CA bundle; plain http on the
+  # LAN is not affected by this setting.
+  verify_ssl: true
+
+globals:
+  - id: last_ok_ms          # millis() of the last good download (or 304)
+    type: uint32_t
+    initial_value: "0"
+  - id: have_image          # true after the first good download
+    type: bool
+    initial_value: "false"
+  - id: ok_count
+    type: uint32_t
+    initial_value: "0"
+  - id: err_count
+    type: uint32_t
+    initial_value: "0"
+  - id: stale_reboots       # survives reboots (stored in flash)
+    type: uint32_t
+    restore_value: true
+    initial_value: "0"
+
+image:
+  - platform: online_image
+    id: proof_image
+    url: !secret image_url
+    format: PNG
+    type: RGB565
+    update_interval: ${refresh_interval}
+    on_download_finished:
+      - lambda: |-
+          id(last_ok_ms) = millis();
+          id(have_image) = true;
+          id(ok_count) += 1;
+          ESP_LOGI("proof", "IMAGE OK #%u (cached=%s)", (unsigned) id(ok_count), cached ? "yes" : "no");
+      - component.update: lcd
+    on_error:
+      - lambda: |-
+          id(err_count) += 1;
+          ESP_LOGE("proof", "IMAGE ERROR #%u; last good %u s ago",
+                   (unsigned) id(err_count), (unsigned) ((millis() - id(last_ok_ms)) / 1000));
+
+display:
+  - platform: mipi_rgb
+    # Built-in ESPHome preset for this exact board: pins, timings, CH422G
+    # reset (EXIO3) and enable/backlight (EXIO2, EXIO6) all come from it.
+    model: ESP32-S3-TOUCH-LCD-7-800X480
+    id: lcd
+    # Redraw only when a new image arrives; no periodic redraw.
+    update_interval: never
+    auto_clear_enabled: false
+    lambda: |-
+      if (id(have_image)) {
+        it.image(0, 0, id(proof_image));
+      } else {
+        // Dark blue = booted, waiting for the first image.
+        it.fill(Color(0, 0, 96));
+      }
+
+# The preset needs the CH422G expander, which sits on this I2C bus with the
+# touch chip. Pins per the Waveshare wiki: SDA GPIO8, SCL GPIO9.
+i2c:
+  sda: GPIO8
+  scl: GPIO9
+  scan: true
+
+ch422g:
+
+# Touch: logs touches only. On the non-touch board (ESP32-S3-LCD-7) delete
+# this block; if left in, GT911 setup fails and logs an error, but the
+# display still works.
+touchscreen:
+  - platform: gt911
+    id: touch
+    display: lcd
+    interrupt_pin: GPIO4
+    reset_pin:
+      ch422g:
+      number: 1           # EXIO1 = TP_RST
+    on_touch:
+      - lambda: |-
+          for (auto touch : touches) {
+            ESP_LOGI("proof", "TOUCH x=%d y=%d", touch.x, touch.y);
+          }
+
+interval:
+  # Heartbeat: one line a minute so a day-long log shows the device alive.
+  - interval: 60s
+    then:
+      - lambda: |-
+          ESP_LOGI("proof",
+            "HEARTBEAT up=%us ok=%u err=%u last_ok=%us ago heap=%u psram=%u rssi=%d",
+            (unsigned) (millis() / 1000), (unsigned) id(ok_count), (unsigned) id(err_count),
+            id(have_image) ? (unsigned) ((millis() - id(last_ok_ms)) / 1000) : 0u,
+            (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            (unsigned) heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+            (int) wifi::global_wifi_component->wifi_rssi());
+
+  # Staleness check: no good download in 3 x refresh_interval -> log loudly and
+  # reboot. This is the guard against online_image hanging silently (the
+  # download stays "in progress" and every later update only logs
+  # "Image already being updated.").
+  - interval: 30s
+    then:
+      - lambda: |-
+          uint32_t age = millis() - id(last_ok_ms);
+          if (age > ${stale_after_ms}UL) {
+            id(stale_reboots) += 1;
+            ESP_LOGE("proof", "STALE: no good image for %u s (limit %u s). Rebooting. Stale reboots total: %u",
+                     (unsigned) (age / 1000), (unsigned) (${stale_after_ms}UL / 1000), (unsigned) id(stale_reboots));
+            App.safe_reboot();
+          }

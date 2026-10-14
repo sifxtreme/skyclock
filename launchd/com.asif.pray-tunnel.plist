@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.asif.pray-tunnel</string>
+  <key>ProgramArguments</key><array>
+    <string>/opt/homebrew/bin/cloudflared</string><string>tunnel</string><string>--config</string>
+    <string>/Users/asifahmed/.cloudflared/pray.yml</string><string>run</string><string>d63ac2dc-6ae6-4cb7-878b-ae60da7dab96</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/asifahmed/.local/share/skyclock/tunnel.log</string>
+  <key>StandardErrorPath</key><string>/Users/asifahmed/.local/share/skyclock/tunnel.log</string>
+</dict></plist>

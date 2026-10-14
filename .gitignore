@@ -1,0 +1,6 @@
+__pycache__/
+*.png
+!docs/*.png
+.venv/
+secrets.yaml
+.esphome/
